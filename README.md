@@ -1,0 +1,35 @@
+# MiniNote
+
+一个适合 macOS 本地使用的简约记事本原型。
+
+## 使用
+
+启动本地服务：
+
+```sh
+node server.js
+```
+
+然后打开 `http://localhost:4173/index.html`。
+
+已实现：
+
+- 文字编辑
+- Markdown 预览
+- 通过顶部“插入”按钮添加图片、视频和其他文件
+- 粘贴、拖拽插入附件
+- 导入 `.md` / `.markdown` / `.txt`
+- 导出 `.md`
+- 自动保存到浏览器本地存储
+- 设置里的专注模式：光标所在行正常显示，离该行越远越淡
+
+## 说明
+
+附件会保存到项目的 `assets/` 目录，正文里写入相对路径，例如：
+
+```md
+![图片](assets/1710000000000-photo.png)
+[文件.pdf](assets/1710000000001-file.pdf)
+```
+
+这避免了 base64 导致 Markdown 文件过大。后续如果需要 macOS `.app` 安装包，可以把这个界面迁移到 Electron 或 Tauri。

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MiniNote</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <input id="noteTitle" class="title-input" value="未命名笔记" aria-label="笔记标题">
+          <p id="saveState" class="save-state">已自动保存</p>
+        </div>
+        <div class="actions" aria-label="工具栏">
+          <button id="editBtn" class="tool active" type="button" title="编辑">编辑</button>
+          <button id="previewBtn" class="tool" type="button" title="预览">预览</button>
+          <div class="menu-wrap">
+            <button id="insertBtn" class="tool" type="button" title="插入附件">插入</button>
+            <div id="insertMenu" class="settings-menu insert-menu hidden">
+              <button id="insertImageBtn" type="button">图片</button>
+              <button id="insertVideoBtn" type="button">视频</button>
+              <button id="insertFileBtn" type="button">其他文件</button>
+            </div>
+          </div>
+          <div class="menu-wrap">
+            <button id="settingsBtn" class="icon-tool gear" type="button" title="设置" aria-label="设置">⚙</button>
+            <div id="settingsMenu" class="settings-menu hidden">
+              <button id="focusBtn" type="button">开启专注模式</button>
+              <button id="importBtn" type="button">导入 Markdown</button>
+              <button id="exportBtn" type="button">导出 Markdown</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section id="dropZone" class="workspace">
+        <div id="focusLayer" class="focus-layer hidden" aria-hidden="true"></div>
+        <textarea
+          id="editor"
+          spellcheck="true"
+          aria-label="Markdown 编辑器"
+          placeholder="开始写一点什么... 支持 Markdown，也可以粘贴或拖入附件。"></textarea>
+        <article id="preview" class="preview hidden" aria-label="Markdown 预览"></article>
+        <div id="dropHint" class="drop-hint">松开以插入附件</div>
+      </section>
+    </main>
+
+    <input id="assetInput" type="file" multiple hidden>
+    <input id="markdownInput" type="file" accept=".md,.markdown,text/markdown,text/plain" hidden>
+    <script src="app.js"></script>
+  </body>
+</html>

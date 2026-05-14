@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>MiniNote</title>
+    <title>AIdea</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
@@ -29,6 +29,7 @@
             <div id="settingsMenu" class="settings-menu hidden">
               <button id="focusBtn" type="button">开启专注模式</button>
               <button id="ioBtn" type="button">导入/导出</button>
+              <button id="cloudBtn" type="button">云端同步</button>
               <button id="deleteNoteBtn" class="danger" type="button">删除当前笔记</button>
             </div>
           </div>
@@ -77,6 +78,33 @@
           </div>
         </div>
         <button id="confirmExportBtn" class="dialog-primary" type="button">继续</button>
+      </div>
+    </div>
+    <div id="cloudDialog" class="dialog-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="cloudTitle">
+      <div class="dialog">
+        <div class="dialog-head">
+          <h2 id="cloudTitle">云端同步</h2>
+          <button id="closeCloudBtn" class="dialog-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="dialog-section">
+          <p>账户名</p>
+          <input id="cloudAccount" class="dialog-input" type="text" autocomplete="username" placeholder="例如 lazymice">
+        </div>
+        <div class="dialog-section">
+          <p>传输密钥</p>
+          <input id="cloudPin" class="dialog-input" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" autocomplete="one-time-code" placeholder="4 位数字">
+        </div>
+        <details id="cloudAdvanced" class="dialog-section advanced-settings">
+          <summary>高级设置</summary>
+          <label>
+            <span>OSS Secret</span>
+            <input id="cloudAccessKeySecret" class="dialog-input" type="password" autocomplete="off" placeholder="不填写则使用服务端配置">
+          </label>
+        </details>
+        <div class="dialog-actions">
+          <button id="cloudUploadBtn" class="dialog-primary" type="button">上传本地全部</button>
+          <button id="cloudSyncBtn" class="dialog-secondary" type="button">从云端同步</button>
+        </div>
       </div>
     </div>
     <script src="app.js"></script>

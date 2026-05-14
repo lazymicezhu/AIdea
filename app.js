@@ -17,6 +17,7 @@ const focusBtn = document.querySelector("#focusBtn");
 const settingsBtn = document.querySelector("#settingsBtn");
 const settingsMenu = document.querySelector("#settingsMenu");
 const ioBtn = document.querySelector("#ioBtn");
+const cloudBtn = document.querySelector("#cloudBtn");
 const deleteNoteBtn = document.querySelector("#deleteNoteBtn");
 const insertImageBtn = document.querySelector("#insertImageBtn");
 const insertVideoBtn = document.querySelector("#insertVideoBtn");
@@ -28,6 +29,13 @@ const exportDialog = document.querySelector("#exportDialog");
 const closeExportBtn = document.querySelector("#closeExportBtn");
 const confirmExportBtn = document.querySelector("#confirmExportBtn");
 const exportScopeSection = document.querySelector("#exportScopeSection");
+const cloudDialog = document.querySelector("#cloudDialog");
+const closeCloudBtn = document.querySelector("#closeCloudBtn");
+const cloudAccount = document.querySelector("#cloudAccount");
+const cloudPin = document.querySelector("#cloudPin");
+const cloudAccessKeySecret = document.querySelector("#cloudAccessKeySecret");
+const cloudUploadBtn = document.querySelector("#cloudUploadBtn");
+const cloudSyncBtn = document.querySelector("#cloudSyncBtn");
 
 let saveTimer;
 let pendingAssetKind = "file";
@@ -629,7 +637,7 @@ async function performExport() {
   saveNote();
   const scope = selectedExportOption("exportScope");
   const notes = scope === "all" ? notesState.notes : [activeNote()];
-  const title = scope === "all" ? "MiniNote-全部笔记" : safeFilename(notes[0].title);
+  const title = scope === "all" ? "AIdea-全部笔记" : safeFilename(notes[0].title);
   const format = scope === "all" ? "zip" : "md";
   const content = scope === "all" ? "" : notes[0].body;
   const assets = assetsForNotes(notes);
@@ -678,6 +686,127 @@ function openExportDialog() {
 
 function closeExportDialog() {
   exportDialog.classList.add("hidden");
+}
+
+function cloudSettings() {
+  return {
+    account: cloudAccount.value.trim(),
+    pin: cloudPin.value.trim(),
+    ossSecret: cloudAccessKeySecret.value.trim()
+  };
+}
+
+function validateCloudSettings() {
+  const settings = cloudSettings();
+  if (!settings.account) {
+    alert("请先填写账户名。");
+    return null;
+  }
+  if (!/^\d{4}$/.test(settings.pin)) {
+    alert("传输密钥需要是 4 位纯数字。");
+    return null;
+  }
+  localStorage.setItem("mininote.cloud.v1", JSON.stringify(settings));
+  return settings;
+}
+
+function loadCloudSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("mininote.cloud.v1"));
+    if (saved) {
+      cloudAccount.value = saved.account || "";
+      cloudPin.value = saved.pin || "";
+      cloudAccessKeySecret.value = saved.ossSecret || "";
+    }
+  } catch {
+    // Ignore bad local settings.
+  }
+}
+
+async function cloudRequest(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || `云端请求失败：${response.status}`);
+  }
+  return data;
+}
+
+async function uploadCloud() {
+  saveNote();
+  const settings = validateCloudSettings();
+  if (!settings) return;
+  try {
+    saveState.textContent = "正在上传云端...";
+    const result = await cloudRequest("/cloud/upload", {
+      ...settings,
+      activeId: notesState.activeId,
+      notes: notesState.notes,
+      assets: assetsForNotes(notesState.notes)
+    });
+    closeCloudDialog();
+    saveState.textContent = `已上传 ${result.uploadedNotes} 篇笔记`;
+    alert(`已上传到云端：${result.uploadedNotes} 篇笔记，${result.uploadedAssets} 个附件。已清理 ${result.deletedAssets || 0} 个云端旧附件。`);
+  } catch (error) {
+    console.error(error);
+    saveState.textContent = "云端上传失败";
+    alert(error.message);
+  }
+}
+
+function mergeCloudNotes(cloudNotes) {
+  const localByTitle = new Map(notesState.notes.map((note) => [note.title, note]));
+  const cloudTitles = new Set(cloudNotes.map((note) => note.title));
+  const normalizedCloud = cloudNotes.map(normalizeNote);
+  const localOnly = notesState.notes.filter((note) => !cloudTitles.has(note.title));
+  notesState.notes = [...normalizedCloud, ...localOnly];
+  notesState.notes.forEach((note) => {
+    const local = localByTitle.get(note.title);
+    if (local && !cloudTitles.has(note.title)) return;
+    if (local && cloudTitles.has(note.title)) {
+      note.pinned = local.pinned || note.pinned;
+      note.mode = local.mode || note.mode;
+    }
+  });
+  activeNoteId = notesState.notes.some((note) => note.id === activeNoteId)
+    ? activeNoteId
+    : notesState.notes[0]?.id;
+  notesState.activeId = activeNoteId;
+}
+
+async function syncCloud() {
+  saveNote();
+  const settings = validateCloudSettings();
+  if (!settings) return;
+  try {
+    saveState.textContent = "正在同步云端...";
+    const result = await cloudRequest("/cloud/sync", settings);
+    mergeCloudNotes(result.notes || []);
+    persistNotes();
+    closeCloudDialog();
+    loadActiveNote();
+    saveState.textContent = `已同步 ${result.notes.length} 篇云端笔记`;
+    alert(`已同步云端：云端同名笔记已覆盖，本地新增笔记已保留。`);
+  } catch (error) {
+    console.error(error);
+    saveState.textContent = "云端同步失败";
+    alert(error.message);
+  }
+}
+
+function openCloudDialog() {
+  closeMenus();
+  loadCloudSettings();
+  cloudDialog.classList.remove("hidden");
+  cloudAccount.focus();
+}
+
+function closeCloudDialog() {
+  cloudDialog.classList.add("hidden");
 }
 
 function closeMenus() {
@@ -798,6 +927,8 @@ ioBtn.addEventListener("click", () => {
   openExportDialog();
 });
 
+cloudBtn.addEventListener("click", openCloudDialog);
+
 closeExportBtn.addEventListener("click", closeExportDialog);
 confirmExportBtn.addEventListener("click", performImportExport);
 document.querySelectorAll('input[name="ioAction"]').forEach((input) => {
@@ -805,6 +936,13 @@ document.querySelectorAll('input[name="ioAction"]').forEach((input) => {
 });
 exportDialog.addEventListener("click", (event) => {
   if (event.target === exportDialog) closeExportDialog();
+});
+
+closeCloudBtn.addEventListener("click", closeCloudDialog);
+cloudUploadBtn.addEventListener("click", uploadCloud);
+cloudSyncBtn.addEventListener("click", syncCloud);
+cloudDialog.addEventListener("click", (event) => {
+  if (event.target === cloudDialog) closeCloudDialog();
 });
 
 deleteNoteBtn.addEventListener("click", deleteCurrentNote);
@@ -839,6 +977,7 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape") {
     closeExportDialog();
+    closeCloudDialog();
   }
 });
 

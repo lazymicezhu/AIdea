@@ -4,11 +4,41 @@ const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { execFile } = require("node:child_process");
+const crypto = require("node:crypto");
+const https = require("node:https");
 
 const ROOT = __dirname;
+
+function loadEnvFile() {
+  try {
+    const envPath = path.join(ROOT, ".env");
+    const content = require("node:fs").readFileSync(envPath, "utf8");
+    content.split(/\r?\n/).forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return;
+      const separator = trimmed.indexOf("=");
+      if (separator === -1) return;
+      const key = trimmed.slice(0, separator).trim();
+      const value = trimmed.slice(separator + 1).trim().replace(/^["']|["']$/g, "");
+      if (key && process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    });
+  } catch {
+    // Environment variables can still be provided by the shell.
+  }
+}
+
+loadEnvFile();
+
 const PORT = Number(process.env.PORT || 4173);
 const ASSET_DIR = path.join(ROOT, "assets");
 const PDF_EXPORTER = path.join(ROOT, "pdf-export.swift");
+const DEFAULT_OSS_BUCKET = process.env.ALI_OSS_BUCKET || "";
+const DEFAULT_OSS_REGION = process.env.ALI_OSS_REGION || "";
+const DEFAULT_OSS_ENDPOINT = process.env.ALI_OSS_ENDPOINT || (DEFAULT_OSS_REGION ? `oss-${DEFAULT_OSS_REGION}.aliyuncs.com` : "");
+const DEFAULT_OSS_ACCESS_KEY_ID = process.env.ALI_OSS_ACCESS_KEY_ID || "";
+const DEFAULT_OSS_ACCESS_KEY_SECRET = process.env.ALI_OSS_ACCESS_KEY_SECRET || "";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -30,6 +60,12 @@ const MIME_TYPES = {
 function send(res, status, body, headers = {}) {
   res.writeHead(status, headers);
   res.end(body);
+}
+
+function sendJson(res, status, payload) {
+  send(res, status, JSON.stringify(payload), {
+    "Content-Type": "application/json; charset=utf-8"
+  });
 }
 
 function cleanFilename(name) {
@@ -88,6 +124,123 @@ function safeExportName(name, fallback = "mininote") {
     .replace(/\s+/g, "-") || fallback;
 }
 
+function safeCloudAccount(name) {
+  return safeExportName(name, "default").replace(/^-+|-+$/g, "") || "default";
+}
+
+function validateCloudInput(payload) {
+  const account = safeCloudAccount(String(payload.account || ""));
+  const pin = String(payload.pin || "");
+  if (!/^\d{4}$/.test(pin)) {
+    throw new Error("传输密钥必须是 4 位数字");
+  }
+  return { account, pin };
+}
+
+function pinHash(account, pin) {
+  return crypto.createHash("sha256").update(`${account}:${pin}`).digest("hex");
+}
+
+function cloudPrefix(account) {
+  return `mininote/${account}`;
+}
+
+function ossConfigFromPayload(payload = {}) {
+  return {
+    bucket: DEFAULT_OSS_BUCKET,
+    endpoint: DEFAULT_OSS_ENDPOINT,
+    accessKeyId: DEFAULT_OSS_ACCESS_KEY_ID,
+    accessKeySecret: String(payload.ossSecret || "").trim() || DEFAULT_OSS_ACCESS_KEY_SECRET
+  };
+}
+
+function ossConfigured(config) {
+  return Boolean(config.bucket && config.endpoint && config.accessKeyId && config.accessKeySecret);
+}
+
+function encodeOssKey(key) {
+  return key.split("/").map(encodeURIComponent).join("/");
+}
+
+function ossRequest(config, method, key, body = Buffer.alloc(0), contentType = "") {
+  if (!ossConfigured(config)) {
+    return Promise.reject(new Error("OSS is not configured"));
+  }
+
+  const payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
+  const date = new Date().toUTCString();
+  const resource = `/${config.bucket}/${key}`;
+  const stringToSign = `${method}\n\n${contentType}\n${date}\n${resource}`;
+  const signature = crypto
+    .createHmac("sha1", config.accessKeySecret)
+    .update(stringToSign)
+    .digest("base64");
+
+  const headers = {
+    Date: date,
+    Authorization: `OSS ${config.accessKeyId}:${signature}`
+  };
+  if (contentType) headers["Content-Type"] = contentType;
+  if (method !== "GET" && method !== "DELETE") headers["Content-Length"] = payload.length;
+
+  const options = {
+    method,
+    hostname: `${config.bucket}.${config.endpoint}`,
+    path: `/${encodeOssKey(key)}`,
+    headers
+  };
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(options, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const data = Buffer.concat(chunks);
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          resolve(data);
+          return;
+        }
+        const error = new Error(`OSS ${method} ${key} failed: ${response.statusCode} ${data.toString("utf8")}`);
+        error.statusCode = response.statusCode;
+        reject(error);
+      });
+    });
+    request.on("error", reject);
+    if (method !== "GET" && method !== "DELETE") request.write(payload);
+    request.end();
+  });
+}
+
+async function readCloudManifest(config, prefix) {
+  try {
+    const manifestBuffer = await ossRequest(config, "GET", `${prefix}/manifest.json`);
+    return JSON.parse(manifestBuffer.toString("utf8"));
+  } catch (error) {
+    if (error.statusCode === 404) return null;
+    throw error;
+  }
+}
+
+async function deleteUnusedCloudAssets(config, prefix, oldManifest, nextAssetNames) {
+  if (!oldManifest || !Array.isArray(oldManifest.assets)) return 0;
+  const nextAssets = new Set(nextAssetNames);
+  const staleAssets = oldManifest.assets.filter((assetName) => !nextAssets.has(assetName));
+  let deleted = 0;
+
+  for (const assetName of staleAssets) {
+    const safePath = safeAssetPath(assetName);
+    if (!safePath) continue;
+    try {
+      await ossRequest(config, "DELETE", `${prefix}/${safePath.replaceAll(path.sep, "/")}`);
+      deleted += 1;
+    } catch (error) {
+      if (error.statusCode !== 404) throw error;
+    }
+  }
+
+  return deleted;
+}
+
 function safeAssetPath(assetPath) {
   const normalized = path.normalize(assetPath).replace(/^(\.\.[/\\])+/, "");
   if (!normalized.startsWith(`assets${path.sep}`) && !normalized.startsWith("assets/")) return null;
@@ -109,6 +262,17 @@ async function readAssetFiles(assetPaths) {
     }
   }
   return files;
+}
+
+async function writeAssetFiles(assetFiles) {
+  for (const asset of assetFiles) {
+    const safePath = safeAssetPath(asset.name);
+    if (!safePath) continue;
+    const target = path.join(ROOT, safePath);
+    if (!target.startsWith(ASSET_DIR)) continue;
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, asset.data);
+  }
 }
 
 function execFilePromise(command, args) {
@@ -249,6 +413,86 @@ async function handleExport(req, res) {
   });
 }
 
+async function handleCloudUpload(req, res) {
+  const body = await readRequestBody(req);
+  const payload = JSON.parse(body.toString("utf8") || "{}");
+  const ossConfig = ossConfigFromPayload(payload);
+  if (!ossConfigured(ossConfig)) {
+    sendJson(res, 500, { error: "OSS 未配置，请设置服务端 Bucket / Region / AccessKey ID，并在高级设置填写 OSS Secret。" });
+    return;
+  }
+  const { account, pin } = validateCloudInput(payload);
+  const notes = Array.isArray(payload.notes) ? payload.notes : [];
+  const activeId = String(payload.activeId || "");
+  const assets = Array.isArray(payload.assets) ? payload.assets : [];
+  const assetFiles = await readAssetFiles(assets);
+  const prefix = cloudPrefix(account);
+  const oldManifest = await readCloudManifest(ossConfig, prefix);
+  if (oldManifest && oldManifest.keyHash !== pinHash(account, pin)) {
+    sendJson(res, 403, { error: "账户名或传输密钥不匹配" });
+    return;
+  }
+  const nextAssetNames = assetFiles.map((asset) => asset.name);
+  const deletedAssets = await deleteUnusedCloudAssets(ossConfig, prefix, oldManifest, nextAssetNames);
+  const manifest = {
+    version: 1,
+    account,
+    keyHash: pinHash(account, pin),
+    uploadedAt: Date.now(),
+    activeId,
+    notes,
+    assets: nextAssetNames
+  };
+
+  await ossRequest(ossConfig, "PUT", `${prefix}/manifest.json`, JSON.stringify(manifest, null, 2), "application/json; charset=utf-8");
+  for (const asset of assetFiles) {
+    await ossRequest(ossConfig, "PUT", `${prefix}/${asset.name}`, asset.data, MIME_TYPES[path.extname(asset.name).toLowerCase()] || "application/octet-stream");
+  }
+
+  sendJson(res, 200, { ok: true, uploadedNotes: notes.length, uploadedAssets: assetFiles.length, deletedAssets });
+}
+
+async function handleCloudSync(req, res) {
+  const body = await readRequestBody(req);
+  const payload = JSON.parse(body.toString("utf8") || "{}");
+  const ossConfig = ossConfigFromPayload(payload);
+  if (!ossConfigured(ossConfig)) {
+    sendJson(res, 500, { error: "OSS 未配置，请设置服务端 Bucket / Region / AccessKey ID，并在高级设置填写 OSS Secret。" });
+    return;
+  }
+  const { account, pin } = validateCloudInput(payload);
+  const prefix = cloudPrefix(account);
+  const manifest = await readCloudManifest(ossConfig, prefix);
+  if (!manifest) {
+    sendJson(res, 404, { error: "云端还没有可同步的数据，请先上传。" });
+    return;
+  }
+  if (manifest.keyHash !== pinHash(account, pin)) {
+    sendJson(res, 403, { error: "账户名或传输密钥不匹配" });
+    return;
+  }
+
+  const assetFiles = [];
+  for (const assetName of Array.isArray(manifest.assets) ? manifest.assets : []) {
+    const safePath = safeAssetPath(assetName);
+    if (!safePath) continue;
+    try {
+      const data = await ossRequest(ossConfig, "GET", `${prefix}/${safePath.replaceAll(path.sep, "/")}`);
+      assetFiles.push({ name: safePath, data });
+    } catch {
+      // Missing cloud assets are skipped; the note body is still synced.
+    }
+  }
+  await writeAssetFiles(assetFiles);
+
+  sendJson(res, 200, {
+    ok: true,
+    activeId: manifest.activeId || "",
+    notes: Array.isArray(manifest.notes) ? manifest.notes : [],
+    assets: assetFiles.map((asset) => asset.name)
+  });
+}
+
 async function handleUpload(req, res) {
   const body = await readRequestBody(req);
   const files = parseMultipart(body, req.headers["content-type"] || "");
@@ -302,6 +546,14 @@ const server = http.createServer(async (req, res) => {
       await handleExport(req, res);
       return;
     }
+    if (req.method === "POST" && req.url === "/cloud/upload") {
+      await handleCloudUpload(req, res);
+      return;
+    }
+    if (req.method === "POST" && req.url === "/cloud/sync") {
+      await handleCloudSync(req, res);
+      return;
+    }
     if (req.method === "GET" || req.method === "HEAD") {
       await handleStatic(req, res);
       return;
@@ -314,5 +566,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`MiniNote running at http://localhost:${PORT}/`);
+  console.log(`AIdea running at http://localhost:${PORT}/`);
 });

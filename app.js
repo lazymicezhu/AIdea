@@ -45,6 +45,7 @@ let focusedLineIndex = 0;
 let notesState = null;
 let activeNoteId = null;
 let mediaRenderIndex = 0;
+const syncedAssetUrls = new Map();
 
 const BROWSER_OSS_CONFIG = {
   bucket: "lazymice-vault",
@@ -248,10 +249,14 @@ function mediaSizeLabel(size) {
   return ({ small: "小", medium: "中", original: "原始" })[size] || "原始";
 }
 
+function resolvedAssetUrl(src) {
+  return syncedAssetUrls.get(decodeURIComponent(src)) || src;
+}
+
 function inlineMarkdown(value) {
   return escapeHtml(value)
     .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) => {
-      const safeSrc = escapeAttribute(src);
+      const safeSrc = escapeAttribute(resolvedAssetUrl(src));
       const size = mediaSizeFromAlt(alt);
       const cleanAlt = mediaAltText(alt);
       const mediaIndex = mediaRenderIndex++;
@@ -260,7 +265,7 @@ function inlineMarkdown(value) {
       }
       return `<img class="media-size-${size}" src="${safeSrc}" alt="${escapeAttribute(cleanAlt)}" data-media-index="${mediaIndex}" data-size="${size}" title="点击切换尺寸：${mediaSizeLabel(size)}">`;
     })
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, src) => `<a href="${escapeAttribute(resolvedAssetUrl(src))}" target="_blank" rel="noreferrer">${text}</a>`)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\*([^*]+)\*/g, "<em>$1</em>");
@@ -530,7 +535,7 @@ async function insertAsset(file) {
     setTimeout(saveNote, 240);
   } catch (error) {
     console.error(error);
-    alert("附件保存失败。请确认是通过本地服务打开页面，而不是直接双击 index.html。");
+    alert("附件保存失败。请确认 AIdea 本地服务正在运行，并重新打开应用后再试。");
     saveNote();
   }
 }
@@ -837,7 +842,7 @@ async function browserAssetFiles(assetPaths) {
   for (const assetPath of assetPaths) {
     if (!assetPath.startsWith("assets/")) continue;
     try {
-      const response = await fetch(assetPath);
+      const response = await fetch(resolvedAssetUrl(assetPath));
       if (!response.ok) continue;
       const data = await response.arrayBuffer();
       files.push({
@@ -850,6 +855,27 @@ async function browserAssetFiles(assetPaths) {
     }
   }
   return files;
+}
+
+function clearSyncedAssetUrls() {
+  syncedAssetUrls.forEach((url) => {
+    if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+  });
+  syncedAssetUrls.clear();
+}
+
+async function browserLoadCloudAssets(prefix, assetNames, secret) {
+  clearSyncedAssetUrls();
+  for (const assetName of assetNames) {
+    if (!assetName.startsWith("assets/")) continue;
+    try {
+      const response = await browserOssRequest("GET", `${prefix}/${assetName}`, null, "", secret);
+      const blob = await response.blob();
+      syncedAssetUrls.set(assetName, URL.createObjectURL(blob));
+    } catch {
+      // A missing attachment should not block syncing the note text.
+    }
+  }
 }
 
 async function browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, secret) {
@@ -919,11 +945,13 @@ async function browserCloudSync(payload) {
   if (manifest.keyHash !== await sha256Hex(`${account}:${payload.pin}`)) {
     throw new Error("账户名或传输密钥不匹配");
   }
+  const assets = Array.isArray(manifest.assets) ? manifest.assets : [];
+  await browserLoadCloudAssets(prefix, assets, payload.ossSecret);
   return {
     ok: true,
     activeId: manifest.activeId || "",
     notes: Array.isArray(manifest.notes) ? manifest.notes : [],
-    assets: Array.isArray(manifest.assets) ? manifest.assets : []
+    assets
   };
 }
 

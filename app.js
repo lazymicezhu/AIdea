@@ -33,6 +33,7 @@ const cloudDialog = document.querySelector("#cloudDialog");
 const closeCloudBtn = document.querySelector("#closeCloudBtn");
 const cloudAccount = document.querySelector("#cloudAccount");
 const cloudPin = document.querySelector("#cloudPin");
+const cloudAccessKeyId = document.querySelector("#cloudAccessKeyId");
 const cloudAccessKeySecret = document.querySelector("#cloudAccessKeySecret");
 const cloudUploadBtn = document.querySelector("#cloudUploadBtn");
 const cloudSyncBtn = document.querySelector("#cloudSyncBtn");
@@ -44,6 +45,11 @@ let focusedLineIndex = 0;
 let notesState = null;
 let activeNoteId = null;
 let mediaRenderIndex = 0;
+
+const BROWSER_OSS_CONFIG = {
+  bucket: "lazymice-vault",
+  endpoint: "oss-cn-guangzhou.aliyuncs.com"
+};
 
 function starterNote() {
   return {
@@ -692,6 +698,7 @@ function cloudSettings() {
   return {
     account: cloudAccount.value.trim(),
     pin: cloudPin.value.trim(),
+    ossAccessKeyId: cloudAccessKeyId.value.trim(),
     ossSecret: cloudAccessKeySecret.value.trim()
   };
 }
@@ -716,6 +723,7 @@ function loadCloudSettings() {
     if (saved) {
       cloudAccount.value = saved.account || "";
       cloudPin.value = saved.pin || "";
+      cloudAccessKeyId.value = saved.ossAccessKeyId || "";
       cloudAccessKeySecret.value = saved.ossSecret || "";
     }
   } catch {
@@ -724,6 +732,14 @@ function loadCloudSettings() {
 }
 
 async function cloudRequest(path, payload) {
+  if (payload.ossSecret) {
+    if (!payload.ossAccessKeyId) {
+      throw new Error("GitHub Pages 使用云端同步时，需要在高级设置里填写 AccessKey ID 和 OSS Secret。");
+    }
+    if (path === "/cloud/upload") return browserCloudUpload(payload);
+    if (path === "/cloud/sync") return browserCloudSync(payload);
+  }
+
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -734,6 +750,181 @@ async function cloudRequest(path, payload) {
     throw new Error(data.error || `云端请求失败：${response.status}`);
   }
   return data;
+}
+
+function safeCloudAccount(name) {
+  return safeFilename(name, "default").replace(/^-+|-+$/g, "") || "default";
+}
+
+function cloudPrefix(account) {
+  return `mininote/${safeCloudAccount(account)}`;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
+function bytesToHex(bytes) {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return bytesToHex(new Uint8Array(digest));
+}
+
+async function hmacSha1Base64(secret, value) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  return bytesToBase64(new Uint8Array(signature));
+}
+
+async function signedOssUrl(method, key, contentType, secret) {
+  const expires = Math.floor(Date.now() / 1000) + 600;
+  const resource = `/${BROWSER_OSS_CONFIG.bucket}/${key}`;
+  const stringToSign = `${method}\n\n${contentType || ""}\n${expires}\n${resource}`;
+  const signature = await hmacSha1Base64(secret, stringToSign);
+  const url = new URL(`https://${BROWSER_OSS_CONFIG.bucket}.${BROWSER_OSS_CONFIG.endpoint}/${encodeOssKey(key)}`);
+  url.searchParams.set("OSSAccessKeyId", cloudAccessKeyId.value.trim());
+  url.searchParams.set("Expires", String(expires));
+  url.searchParams.set("Signature", signature);
+  return url.toString();
+}
+
+function encodeOssKey(key) {
+  return key.split("/").map(encodeURIComponent).join("/");
+}
+
+async function browserOssRequest(method, key, body, contentType, secret) {
+  const url = await signedOssUrl(method, key, contentType, secret);
+  const headers = {};
+  if (contentType) headers["Content-Type"] = contentType;
+  const response = await fetch(url, {
+    method,
+    headers,
+    body: method === "GET" || method === "DELETE" ? undefined : body
+  });
+  if (!response.ok) {
+    const error = new Error(`OSS ${method} ${key} 失败：${response.status}`);
+    error.statusCode = response.status;
+    throw error;
+  }
+  return response;
+}
+
+async function browserReadManifest(prefix, secret) {
+  try {
+    const response = await browserOssRequest("GET", `${prefix}/manifest.json`, null, "", secret);
+    return response.json();
+  } catch (error) {
+    if (error.statusCode === 404) return null;
+    throw error;
+  }
+}
+
+async function browserAssetFiles(assetPaths) {
+  const files = [];
+  for (const assetPath of assetPaths) {
+    if (!assetPath.startsWith("assets/")) continue;
+    try {
+      const response = await fetch(assetPath);
+      if (!response.ok) continue;
+      const data = await response.arrayBuffer();
+      files.push({
+        name: assetPath,
+        data,
+        type: response.headers.get("Content-Type") || "application/octet-stream"
+      });
+    } catch {
+      // GitHub Pages cannot read assets that only exist on another local device.
+    }
+  }
+  return files;
+}
+
+async function browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, secret) {
+  if (!oldManifest || !Array.isArray(oldManifest.assets)) return 0;
+  const nextAssets = new Set(nextAssetNames);
+  let deleted = 0;
+  for (const assetName of oldManifest.assets) {
+    if (nextAssets.has(assetName) || !assetName.startsWith("assets/")) continue;
+    try {
+      await browserOssRequest("DELETE", `${prefix}/${assetName}`, null, "", secret);
+      deleted += 1;
+    } catch (error) {
+      if (error.statusCode !== 404) throw error;
+    }
+  }
+  return deleted;
+}
+
+async function browserCloudUpload(payload) {
+  const account = safeCloudAccount(payload.account);
+  const prefix = cloudPrefix(account);
+  const oldManifest = await browserReadManifest(prefix, payload.ossSecret);
+  const keyHash = await sha256Hex(`${account}:${payload.pin}`);
+  if (oldManifest && oldManifest.keyHash !== keyHash) {
+    throw new Error("账户名或传输密钥不匹配");
+  }
+
+  const assetFiles = await browserAssetFiles(Array.isArray(payload.assets) ? payload.assets : []);
+  const nextAssetNames = assetFiles.map((asset) => asset.name);
+  const deletedAssets = await browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, payload.ossSecret);
+  const manifest = {
+    version: 1,
+    account,
+    keyHash,
+    uploadedAt: Date.now(),
+    activeId: String(payload.activeId || ""),
+    notes: Array.isArray(payload.notes) ? payload.notes : [],
+    assets: nextAssetNames
+  };
+
+  await browserOssRequest(
+    "PUT",
+    `${prefix}/manifest.json`,
+    JSON.stringify(manifest, null, 2),
+    "application/json; charset=utf-8",
+    payload.ossSecret
+  );
+  for (const asset of assetFiles) {
+    await browserOssRequest("PUT", `${prefix}/${asset.name}`, asset.data, asset.type, payload.ossSecret);
+  }
+
+  return {
+    ok: true,
+    uploadedNotes: manifest.notes.length,
+    uploadedAssets: assetFiles.length,
+    deletedAssets
+  };
+}
+
+async function browserCloudSync(payload) {
+  const account = safeCloudAccount(payload.account);
+  const prefix = cloudPrefix(account);
+  const manifest = await browserReadManifest(prefix, payload.ossSecret);
+  if (!manifest) {
+    throw new Error("云端还没有可同步的数据，请先上传。");
+  }
+  if (manifest.keyHash !== await sha256Hex(`${account}:${payload.pin}`)) {
+    throw new Error("账户名或传输密钥不匹配");
+  }
+  return {
+    ok: true,
+    activeId: manifest.activeId || "",
+    notes: Array.isArray(manifest.notes) ? manifest.notes : [],
+    assets: Array.isArray(manifest.assets) ? manifest.assets : []
+  };
 }
 
 async function uploadCloud() {

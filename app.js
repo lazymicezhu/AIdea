@@ -810,6 +810,10 @@ function encodeOssKey(key) {
   return key.split("/").map(encodeURIComponent).join("/");
 }
 
+function publicOssUrl(key) {
+  return `https://${BROWSER_OSS_CONFIG.bucket}.${BROWSER_OSS_CONFIG.endpoint}/${encodeOssKey(key)}`;
+}
+
 async function browserOssRequest(method, key, body, contentType, secret) {
   const url = await signedOssUrl(method, key, contentType, secret);
   const headers = {};
@@ -825,6 +829,15 @@ async function browserOssRequest(method, key, body, contentType, secret) {
     throw error;
   }
   return response;
+}
+
+function replaceLocalAssetsWithPublicUrls(markdown, prefix, assetNames) {
+  const assetSet = new Set(assetNames);
+  return markdown.replace(/(!?\[[^\]]*\]\()([^)]+)(\))/g, (match, opener, src, closer) => {
+    const cleanSrc = decodeURIComponent(src.trim());
+    if (!cleanSrc.startsWith("assets/") || !assetSet.has(cleanSrc)) return match;
+    return `${opener}${publicOssUrl(`${prefix}/${cleanSrc}`)}${closer}`;
+  });
 }
 
 async function browserReadManifest(prefix, secret) {
@@ -906,13 +919,19 @@ async function browserCloudUpload(payload) {
   const assetFiles = await browserAssetFiles(Array.isArray(payload.assets) ? payload.assets : []);
   const nextAssetNames = assetFiles.map((asset) => asset.name);
   const deletedAssets = await browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, payload.ossSecret);
+  const notes = Array.isArray(payload.notes)
+    ? payload.notes.map((note) => ({
+      ...note,
+      body: replaceLocalAssetsWithPublicUrls(String(note.body || ""), prefix, nextAssetNames)
+    }))
+    : [];
   const manifest = {
     version: 1,
     account,
     keyHash,
     uploadedAt: Date.now(),
     activeId: String(payload.activeId || ""),
-    notes: Array.isArray(payload.notes) ? payload.notes : [],
+    notes,
     assets: nextAssetNames
   };
 

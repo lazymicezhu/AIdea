@@ -28,27 +28,57 @@
             <button id="settingsBtn" class="icon-tool gear" type="button" title="设置" aria-label="设置">⚙</button>
             <div id="settingsMenu" class="settings-menu hidden">
               <button id="focusBtn" type="button">开启专注模式</button>
-              <button id="importBtn" type="button">导入 Markdown</button>
-              <button id="exportBtn" type="button">导出 Markdown</button>
+              <button id="ioBtn" type="button">导入/导出</button>
+              <button id="deleteNoteBtn" class="danger" type="button">删除当前笔记</button>
             </div>
           </div>
         </div>
       </header>
 
-      <section id="dropZone" class="workspace">
-        <div id="focusLayer" class="focus-layer hidden" aria-hidden="true"></div>
-        <textarea
-          id="editor"
-          spellcheck="true"
-          aria-label="Markdown 编辑器"
-          placeholder="开始写一点什么... 支持 Markdown，也可以粘贴或拖入附件。"></textarea>
-        <article id="preview" class="preview hidden" aria-label="Markdown 预览"></article>
-        <div id="dropHint" class="drop-hint">松开以插入附件</div>
-      </section>
+      <div class="app-body">
+        <aside class="note-sidebar" aria-label="笔记列表">
+          <button id="newNoteBtn" class="new-note-btn" type="button">新建</button>
+          <div id="noteList" class="note-list"></div>
+        </aside>
+
+        <section id="dropZone" class="workspace">
+          <div id="focusLayer" class="focus-layer hidden" aria-hidden="true"></div>
+          <textarea
+            id="editor"
+            spellcheck="true"
+            aria-label="Markdown 编辑器"
+            placeholder="开始写一点什么... 支持 Markdown，也可以粘贴或拖入附件。"></textarea>
+          <article id="preview" class="preview hidden" aria-label="Markdown 预览"></article>
+          <div id="dropHint" class="drop-hint">松开以插入附件</div>
+        </section>
+      </div>
     </main>
 
     <input id="assetInput" type="file" multiple hidden>
     <input id="markdownInput" type="file" accept=".md,.markdown,text/markdown,text/plain" hidden>
+    <div id="exportDialog" class="dialog-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+      <div class="dialog">
+        <div class="dialog-head">
+          <h2 id="exportTitle">导入 / 导出</h2>
+          <button id="closeExportBtn" class="dialog-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="dialog-section">
+          <p>操作</p>
+          <div class="segmented">
+            <label><input type="radio" name="ioAction" value="import" checked> 导入</label>
+            <label><input type="radio" name="ioAction" value="export"> 导出</label>
+          </div>
+        </div>
+        <div id="exportScopeSection" class="dialog-section hidden">
+          <p>范围</p>
+          <div class="segmented">
+            <label><input type="radio" name="exportScope" value="current" checked> 当前笔记</label>
+            <label><input type="radio" name="exportScope" value="all"> 全部笔记</label>
+          </div>
+        </div>
+        <button id="confirmExportBtn" class="dialog-primary" type="button">继续</button>
+      </div>
+    </div>
     <script src="app.js"></script>
   </body>
 </html>

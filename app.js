@@ -1,10 +1,14 @@
-const STORAGE_KEY = "mininote.document.v1";
+const LEGACY_STORAGE_KEY = "mininote.document.v1";
+const STORAGE_KEY = "mininote.notes.v2";
+const AUTOSAVE_DELAY = 60000;
 
 const editor = document.querySelector("#editor");
 const preview = document.querySelector("#preview");
 const focusLayer = document.querySelector("#focusLayer");
 const noteTitle = document.querySelector("#noteTitle");
 const saveState = document.querySelector("#saveState");
+const newNoteBtn = document.querySelector("#newNoteBtn");
+const noteList = document.querySelector("#noteList");
 const editBtn = document.querySelector("#editBtn");
 const previewBtn = document.querySelector("#previewBtn");
 const insertBtn = document.querySelector("#insertBtn");
@@ -12,47 +16,197 @@ const insertMenu = document.querySelector("#insertMenu");
 const focusBtn = document.querySelector("#focusBtn");
 const settingsBtn = document.querySelector("#settingsBtn");
 const settingsMenu = document.querySelector("#settingsMenu");
-const importBtn = document.querySelector("#importBtn");
-const exportBtn = document.querySelector("#exportBtn");
+const ioBtn = document.querySelector("#ioBtn");
+const deleteNoteBtn = document.querySelector("#deleteNoteBtn");
 const insertImageBtn = document.querySelector("#insertImageBtn");
 const insertVideoBtn = document.querySelector("#insertVideoBtn");
 const insertFileBtn = document.querySelector("#insertFileBtn");
 const assetInput = document.querySelector("#assetInput");
 const markdownInput = document.querySelector("#markdownInput");
 const dropZone = document.querySelector("#dropZone");
+const exportDialog = document.querySelector("#exportDialog");
+const closeExportBtn = document.querySelector("#closeExportBtn");
+const confirmExportBtn = document.querySelector("#confirmExportBtn");
+const exportScopeSection = document.querySelector("#exportScopeSection");
 
 let saveTimer;
 let pendingAssetKind = "file";
 let focusMode = false;
 let focusedLineIndex = 0;
+let notesState = null;
+let activeNoteId = null;
+let mediaRenderIndex = 0;
 
-function loadNote() {
-  const fallback = {
+function starterNote() {
+  return {
+    id: crypto.randomUUID(),
     title: "未命名笔记",
-    body: "# 今天的笔记\n\n可以直接写 **Markdown**。\n\n- 支持标题、列表、引用、代码\n- 外部拖进来的文件会保存到项目的 `assets/` 文件夹\n"
+    body: "# 今天的笔记\n\n可以直接写 **Markdown**。\n\n- 支持标题、列表、引用、代码\n- 外部拖进来的文件会保存到项目的 `assets/` 文件夹\n",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    pinned: false,
+    mode: "preview"
   };
+}
+
+function normalizeNote(note) {
+  const now = Date.now();
+  return {
+    id: note.id || crypto.randomUUID(),
+    title: note.title || "未命名笔记",
+    body: note.body || "",
+    createdAt: note.createdAt || now,
+    updatedAt: note.updatedAt || now,
+    pinned: Boolean(note.pinned),
+    mode: note.mode === "edit" ? "edit" : "preview"
+  };
+}
+
+function loadNotes() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    if (saved && Array.isArray(saved.notes) && saved.notes.length) {
+      const notes = saved.notes.map(normalizeNote);
+      return {
+        activeId: notes.some((note) => note.id === saved.activeId) ? saved.activeId : notes[0].id,
+        notes
+      };
+    }
+  } catch {
+    // Fall through to legacy migration.
+  }
 
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || fallback;
+    const legacy = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY));
+    if (legacy) {
+      const migrated = normalizeNote(legacy);
+      return { activeId: migrated.id, notes: [migrated] };
+    }
   } catch {
-    return fallback;
+    // Fall through to a starter note.
   }
+
+  const firstNote = starterNote();
+  return { activeId: firstNote.id, notes: [firstNote] };
+}
+
+function persistNotes() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(notesState));
+}
+
+function activeNote() {
+  return notesState.notes.find((note) => note.id === activeNoteId) || notesState.notes[0];
+}
+
+function syncActiveNoteFromEditor() {
+  const note = activeNote();
+  note.title = noteTitle.value.trim() || "未命名笔记";
+  note.body = editor.value;
+  note.updatedAt = Date.now();
+  notesState.activeId = note.id;
+  return note;
 }
 
 function saveNote() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    title: noteTitle.value.trim() || "未命名笔记",
-    body: editor.value
-  }));
+  syncActiveNoteFromEditor();
+  persistNotes();
+  renderNoteList();
   saveState.textContent = "已自动保存";
 }
 
 function queueSave() {
-  saveState.textContent = "正在保存...";
+  syncActiveNoteFromEditor();
+  renderNoteList();
+  saveState.textContent = "将在 1 分钟内自动保存";
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveNote, 180);
+  saveTimer = setTimeout(saveNote, AUTOSAVE_DELAY);
   renderPreview();
   renderFocusLayer();
+}
+
+function notePreviewText(note) {
+  const text = note.body
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "[附件]")
+    .replace(/[#>*`_\-[\]()]/g, "")
+    .trim();
+  return text || "空白笔记";
+}
+
+function formatNoteTime(timestamp) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(timestamp);
+}
+
+function renderNoteList() {
+  const orderedNotes = [
+    ...notesState.notes.filter((note) => note.pinned),
+    ...notesState.notes.filter((note) => !note.pinned)
+  ];
+  noteList.innerHTML = orderedNotes.map((note) => `
+    <button class="note-item ${note.id === activeNoteId ? "active" : ""} ${note.pinned ? "pinned" : ""}" type="button" data-note-id="${note.id}">
+      <span class="note-item-title">${escapeHtml(note.title || "未命名笔记")}</span>
+      <span class="note-item-meta">${formatNoteTime(note.updatedAt)} · ${escapeHtml(notePreviewText(note)).slice(0, 18)}</span>
+      <span class="pin-badge" title="${note.pinned ? "取消收藏置顶" : "收藏置顶"}" aria-label="${note.pinned ? "取消收藏置顶" : "收藏置顶"}"></span>
+    </button>
+  `).join("");
+}
+
+function loadActiveNote() {
+  const note = activeNote();
+  activeNoteId = note.id;
+  notesState.activeId = note.id;
+  noteTitle.value = note.title;
+  editor.value = note.body;
+  renderNoteList();
+  renderPreview();
+  renderFocusLayer();
+  setMode(note.mode || "preview", { persist: false });
+  saveState.textContent = "已自动保存";
+}
+
+function switchNote(noteId) {
+  if (noteId === activeNoteId) return;
+  saveNote();
+  activeNoteId = noteId;
+  loadActiveNote();
+}
+
+function createNote() {
+  saveNote();
+  const note = starterNote();
+  note.title = `新笔记 ${notesState.notes.length + 1}`;
+  note.body = "";
+  notesState.notes.unshift(note);
+  activeNoteId = note.id;
+  notesState.activeId = note.id;
+  persistNotes();
+  loadActiveNote();
+}
+
+function deleteCurrentNote() {
+  const note = activeNote();
+  if (!confirm(`确定删除“${note.title || "未命名笔记"}”吗？`)) return;
+  notesState.notes = notesState.notes.filter((item) => item.id !== note.id);
+  if (!notesState.notes.length) {
+    notesState.notes.push(starterNote());
+  }
+  activeNoteId = notesState.notes[0].id;
+  notesState.activeId = activeNoteId;
+  persistNotes();
+  closeMenus();
+  loadActiveNote();
+}
+
+function togglePinnedNote(noteId) {
+  const note = notesState.notes.find((item) => item.id === noteId);
+  if (!note) return;
+  note.pinned = !note.pinned;
+  persistNotes();
+  renderNoteList();
 }
 
 function escapeHtml(value) {
@@ -67,14 +221,30 @@ function escapeAttribute(value) {
   return escapeHtml(value).replaceAll("'", "&#039;");
 }
 
+function mediaSizeFromAlt(alt) {
+  const match = alt.match(/\|(small|medium|original)$/);
+  return match ? match[1] : "original";
+}
+
+function mediaAltText(alt) {
+  return alt.replace(/\|(small|medium|original)$/, "");
+}
+
+function mediaSizeLabel(size) {
+  return ({ small: "小", medium: "中", original: "原始" })[size] || "原始";
+}
+
 function inlineMarkdown(value) {
   return escapeHtml(value)
     .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) => {
       const safeSrc = escapeAttribute(src);
+      const size = mediaSizeFromAlt(alt);
+      const cleanAlt = mediaAltText(alt);
+      const mediaIndex = mediaRenderIndex++;
       if (/\.(mp4|webm|mov|m4v)$/i.test(src)) {
-        return `<video src="${safeSrc}" controls></video>`;
+        return `<video class="media-size-${size}" src="${safeSrc}" controls data-media-index="${mediaIndex}" data-size="${size}" title="点击切换尺寸：${mediaSizeLabel(size)}"></video>`;
       }
-      return `<img src="${safeSrc}" alt="${escapeAttribute(alt)}">`;
+      return `<img class="media-size-${size}" src="${safeSrc}" alt="${escapeAttribute(cleanAlt)}" data-media-index="${mediaIndex}" data-size="${size}" title="点击切换尺寸：${mediaSizeLabel(size)}">`;
     })
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
     .replace(/`([^`]+)`/g, "<code>$1</code>")
@@ -89,6 +259,7 @@ function flushParagraph(lines, html) {
 }
 
 function renderPreview() {
+  mediaRenderIndex = 0;
   const lines = editor.value.split(/\r?\n/);
   const html = [];
   const paragraph = [];
@@ -171,7 +342,7 @@ function renderPreview() {
 
 function wrapVisualLine(text, startOffset, contentWidth, measure) {
   if (!text.length) {
-    return [{ text: "", start: startOffset, end: startOffset }];
+    return [{ text: "", start: startOffset, end: startOffset, hardStart: true }];
   }
 
   const rows = [];
@@ -185,7 +356,8 @@ function wrapVisualLine(text, startOffset, contentWidth, measure) {
       rows.push({
         text: row,
         start: rowStart,
-        end: startOffset + index
+        end: startOffset + index,
+        hardStart: rowStart === startOffset
       });
       row = "";
       rowStart = startOffset + index;
@@ -198,7 +370,8 @@ function wrapVisualLine(text, startOffset, contentWidth, measure) {
   rows.push({
     text: row,
     start: rowStart,
-    end: startOffset + text.length
+    end: startOffset + text.length,
+    hardStart: rowStart === startOffset
   });
   return rows;
 }
@@ -228,12 +401,23 @@ function currentVisualLineIndex() {
   const caret = editor.selectionStart;
   const rows = visualRows();
   const index = rows.findIndex((row, rowIndex) => {
-    const isLast = rowIndex === rows.length - 1;
     if (row.start === row.end) return caret === row.start;
-    if (isLast) return caret >= row.start && caret <= row.end;
-    return caret >= row.start && caret < row.end;
+    if (caret === 0 && row.start === 0) return true;
+    const previous = rows[rowIndex - 1];
+    if (caret === row.start && row.hardStart && (!previous || previous.end < row.start)) return true;
+    return caret > row.start && caret <= row.end;
   });
   return Math.max(0, index === -1 ? rows.length - 1 : index);
+}
+
+function updateFocusedLineFromSelection() {
+  if (document.activeElement !== editor) return;
+  focusedLineIndex = currentVisualLineIndex();
+  renderFocusLayer();
+}
+
+function scheduleFocusedLineUpdate() {
+  requestAnimationFrame(updateFocusedLineFromSelection);
 }
 
 function renderFocusLayer() {
@@ -248,8 +432,15 @@ function renderFocusLayer() {
   focusLayer.scrollLeft = editor.scrollLeft;
 }
 
-function setMode(mode) {
+function setMode(mode, options = {}) {
   const isPreview = mode === "preview";
+  const shouldPersist = options.persist !== false;
+  if (shouldPersist && notesState) {
+    const note = activeNote();
+    note.mode = isPreview ? "preview" : "edit";
+    notesState.activeId = note.id;
+    persistNotes();
+  }
   editor.classList.toggle("hidden", isPreview);
   focusLayer.classList.toggle("hidden", isPreview || !focusMode);
   preview.classList.toggle("hidden", !isPreview);
@@ -280,6 +471,25 @@ function markdownForAsset(file, path) {
   if (file.type.startsWith("image/")) return `\n![${name}](${path})\n`;
   if (file.type.startsWith("video/")) return `\n![${name}](${path})\n`;
   return `\n[${file.name}](${path})\n`;
+}
+
+function nextMediaSize(size) {
+  if (size === "small") return "medium";
+  if (size === "medium") return "original";
+  return "small";
+}
+
+function updateMediaMarkdownSize(targetIndex, nextSize) {
+  let index = 0;
+  editor.value = editor.value.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, src) => {
+    const current = index++;
+    if (current !== targetIndex) return match;
+    const cleanAlt = mediaAltText(alt);
+    const nextAlt = nextSize === "original" ? cleanAlt : `${cleanAlt}|${nextSize}`;
+    return `![${nextAlt}](${src})`;
+  });
+  queueSave();
+  renderPreview();
 }
 
 async function uploadAsset(file) {
@@ -318,18 +528,156 @@ function configureAssetInput(kind) {
   assetInput.click();
 }
 
-function download(filename, content, type) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
+function safeFilename(value, fallback = "mininote") {
+  return (String(value || "").trim() || fallback).replace(/[\\/:*?"<>|]+/g, "-");
 }
 
-function filenameFromTitle() {
-  return `${(noteTitle.value.trim() || "mininote").replace(/[\\/:*?"<>|]+/g, "-")}.md`;
+function selectedExportOption(name) {
+  return document.querySelector(`input[name="${name}"]:checked`).value;
+}
+
+function markdownForNotes(notes) {
+  if (notes.length === 1) return notes[0].body;
+  return notes.map((note) => `# ${note.title || "未命名笔记"}\n\n${note.body}`).join("\n\n---\n\n");
+}
+
+function assetsForMarkdown(markdown) {
+  const assets = new Set();
+  const patterns = [
+    /!\[[^\]]*\]\((assets\/[^)\s]+)\)/g,
+    /\[[^\]]+\]\((assets\/[^)\s]+)\)/g
+  ];
+  patterns.forEach((pattern) => {
+    let match = pattern.exec(markdown);
+    while (match) {
+      assets.add(decodeURIComponent(match[1]));
+      match = pattern.exec(markdown);
+    }
+  });
+  return [...assets];
+}
+
+function assetsForNotes(notes) {
+  return [...new Set(notes.flatMap((note) => assetsForMarkdown(note.body)))];
+}
+
+function previewHtmlForMarkdown(markdown) {
+  const previousPreview = preview.innerHTML;
+  const previousEditor = editor.value;
+  const previousMediaIndex = mediaRenderIndex;
+  editor.value = markdown;
+  renderPreview();
+  const html = preview.innerHTML;
+  editor.value = previousEditor;
+  preview.innerHTML = previousPreview;
+  mediaRenderIndex = previousMediaIndex;
+  return html;
+}
+
+function htmlForNotes(notes) {
+  const body = notes.map((note) => `
+    <section class="print-note">
+      <h1>${escapeHtml(note.title || "未命名笔记")}</h1>
+      ${previewHtmlForMarkdown(note.body)}
+    </section>
+  `).join("");
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      body { margin: 0; color: #242522; font: 14px/1.62 -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; }
+      .print-note { page-break-after: always; }
+      .print-note:last-child { page-break-after: auto; }
+      h1 { font-size: 24px; margin: 0 0 14px; }
+      h2 { font-size: 19px; margin: 18px 0 8px; }
+      h3 { font-size: 16px; margin: 16px 0 6px; }
+      p, ul, ol, blockquote, pre { margin: 10px 0; }
+      blockquote { padding-left: 12px; border-left: 3px solid #176f69; color: #666; }
+      code { background: #eeeeee; border-radius: 4px; padding: 1px 4px; font-family: Menlo, monospace; }
+      pre { padding: 12px; background: #f4f4f4; white-space: pre-wrap; }
+      pre code { background: transparent; padding: 0; }
+      img, video { max-width: 100%; border: 1px solid #ddd; border-radius: 6px; }
+      .media-size-small { max-width: 28%; }
+      .media-size-medium { max-width: 58%; }
+      .media-size-original { max-width: 100%; }
+      a { color: #176f69; }
+    </style>
+  </head>
+  <body>${body}</body>
+</html>`;
+}
+
+function performImport() {
+  closeExportDialog();
+  markdownInput.click();
+}
+
+async function exportToDesktop({ title, content, files, assets, format }) {
+  const response = await fetch("/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, content, files, assets, format })
+  });
+  if (!response.ok) {
+    throw new Error(`Export failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+async function performExport() {
+  saveNote();
+  const scope = selectedExportOption("exportScope");
+  const notes = scope === "all" ? notesState.notes : [activeNote()];
+  const title = scope === "all" ? "MiniNote-全部笔记" : safeFilename(notes[0].title);
+  const format = scope === "all" ? "zip" : "md";
+  const content = scope === "all" ? "" : notes[0].body;
+  const assets = assetsForNotes(notes);
+  const files = scope === "all"
+    ? notes.map((note, index) => ({
+      name: `${String(index + 1).padStart(2, "0")}-${safeFilename(note.title || "未命名笔记")}.md`,
+      content: note.body
+    }))
+    : [];
+  closeExportDialog();
+
+  try {
+    saveState.textContent = "正在导出到桌面...";
+    const result = await exportToDesktop({ title, content, files, assets, format });
+    const filename = result.path.split(/[\\/]/).pop();
+    saveState.textContent = `已导出：${filename}`;
+    alert(`已导出到桌面：\n${result.path}`);
+  } catch (error) {
+    console.error(error);
+    saveState.textContent = "导出失败";
+    alert("导出失败，请确认本地服务正在运行。");
+  }
+}
+
+function performImportExport() {
+  const action = selectedExportOption("ioAction");
+  if (action === "import") {
+    performImport();
+    return;
+  }
+  performExport();
+}
+
+function updateImportExportDialog() {
+  const isExport = selectedExportOption("ioAction") === "export";
+  exportScopeSection.classList.toggle("hidden", !isExport);
+  confirmExportBtn.textContent = isExport ? "导出到桌面" : "导入文件";
+}
+
+function openExportDialog() {
+  closeMenus();
+  document.querySelector('input[name="ioAction"][value="import"]').checked = true;
+  updateImportExportDialog();
+  exportDialog.classList.remove("hidden");
+}
+
+function closeExportDialog() {
+  exportDialog.classList.add("hidden");
 }
 
 function closeMenus() {
@@ -349,24 +697,44 @@ function toggleFocusMode() {
 }
 
 editor.addEventListener("input", queueSave);
-editor.addEventListener("click", () => {
-  focusedLineIndex = currentVisualLineIndex();
-  renderFocusLayer();
-});
-editor.addEventListener("keyup", () => {
-  focusedLineIndex = currentVisualLineIndex();
-  renderFocusLayer();
-});
-editor.addEventListener("focus", () => {
-  focusedLineIndex = currentVisualLineIndex();
-  renderFocusLayer();
-});
+editor.addEventListener("click", scheduleFocusedLineUpdate);
+editor.addEventListener("mouseup", scheduleFocusedLineUpdate);
+editor.addEventListener("keyup", scheduleFocusedLineUpdate);
+editor.addEventListener("focus", scheduleFocusedLineUpdate);
 editor.addEventListener("scroll", renderFocusLayer);
+document.addEventListener("selectionchange", updateFocusedLineFromSelection);
 
 noteTitle.addEventListener("input", queueSave);
+newNoteBtn.addEventListener("click", createNote);
+noteList.addEventListener("click", (event) => {
+  const noteButton = event.target.closest(".note-item");
+  if (!noteButton) return;
+  if (event.target.closest(".pin-badge")) {
+    event.stopPropagation();
+    togglePinnedNote(noteButton.dataset.noteId);
+    return;
+  }
+  switchNote(noteButton.dataset.noteId);
+});
 editBtn.addEventListener("click", () => setMode("edit"));
 previewBtn.addEventListener("click", () => setMode("preview"));
 focusBtn.addEventListener("click", toggleFocusMode);
+
+preview.addEventListener("click", (event) => {
+  const media = event.target.closest("img[data-media-index], video[data-media-index]");
+  if (media) {
+    event.preventDefault();
+    const index = Number(media.dataset.mediaIndex);
+    updateMediaMarkdownSize(index, nextMediaSize(media.dataset.size));
+    return;
+  }
+
+  const link = event.target.closest("a[href]");
+  if (link) {
+    event.preventDefault();
+    window.open(link.href, "_blank", "noopener");
+  }
+});
 
 insertBtn.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -403,29 +771,43 @@ assetInput.addEventListener("change", () => {
   assetInput.value = "";
 });
 
-importBtn.addEventListener("click", () => {
-  closeMenus();
-  markdownInput.click();
-});
-
 markdownInput.addEventListener("change", () => {
   const file = markdownInput.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.addEventListener("load", () => {
-    noteTitle.value = file.name.replace(/\.(md|markdown|txt)$/i, "") || "未命名笔记";
-    editor.value = reader.result;
-    queueSave();
-    setMode("edit");
+    saveNote();
+    const importedNote = normalizeNote({
+      title: file.name.replace(/\.(md|markdown|txt)$/i, "") || "导入笔记",
+      body: reader.result,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      mode: "preview"
+    });
+    notesState.notes.unshift(importedNote);
+    activeNoteId = importedNote.id;
+    notesState.activeId = importedNote.id;
+    persistNotes();
+    loadActiveNote();
   });
   reader.readAsText(file);
   markdownInput.value = "";
 });
 
-exportBtn.addEventListener("click", () => {
-  closeMenus();
-  download(filenameFromTitle(), editor.value, "text/markdown;charset=utf-8");
+ioBtn.addEventListener("click", () => {
+  openExportDialog();
 });
+
+closeExportBtn.addEventListener("click", closeExportDialog);
+confirmExportBtn.addEventListener("click", performImportExport);
+document.querySelectorAll('input[name="ioAction"]').forEach((input) => {
+  input.addEventListener("change", updateImportExportDialog);
+});
+exportDialog.addEventListener("click", (event) => {
+  if (event.target === exportDialog) closeExportDialog();
+});
+
+deleteNoteBtn.addEventListener("click", deleteCurrentNote);
 
 editor.addEventListener("paste", (event) => {
   const files = [...event.clipboardData.files];
@@ -453,13 +835,16 @@ window.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
     saveNote();
-    exportBtn.focus();
+    ioBtn.focus();
+  }
+  if (event.key === "Escape") {
+    closeExportDialog();
   }
 });
 
-const note = loadNote();
-noteTitle.value = note.title;
-editor.value = note.body;
-renderPreview();
-renderFocusLayer();
-saveNote();
+window.addEventListener("beforeunload", saveNote);
+
+notesState = loadNotes();
+activeNoteId = notesState.activeId;
+loadActiveNote();
+persistNotes();

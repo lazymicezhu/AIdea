@@ -786,10 +786,16 @@ function loadCloudSettings() {
 }
 
 async function cloudRequest(path, payload) {
-  if (payload.ossSecret) {
-    if (!payload.ossAccessKeyId) {
-      throw new Error("GitHub Pages 使用云端同步时，需要在高级设置里填写 AccessKey ID 和 OSS Secret。");
+  if (!localServiceAvailable()) {
+    if (!payload.ossAccessKeyId || !payload.ossSecret) {
+      throw new Error("网页版本使用云端同步时，需要在高级设置里填写 AccessKey ID 和 OSS Secret。");
     }
+    if (path === "/cloud/upload") return browserCloudUpload(payload);
+    if (path === "/cloud/sync") return browserCloudSync(payload);
+  }
+
+  if (payload.ossSecret) {
+    if (!payload.ossAccessKeyId) throw new Error("请在高级设置里填写 AccessKey ID。");
     if (path === "/cloud/upload") return browserCloudUpload(payload);
     if (path === "/cloud/sync") return browserCloudSync(payload);
   }

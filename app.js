@@ -536,7 +536,7 @@ async function browserUploadAsset(file, settings) {
     `${prefix}/${assetPath}`,
     await file.arrayBuffer(),
     file.type || "application/octet-stream",
-    settings.ossSecret
+    settings
   );
   return { path: publicOssUrl(`${prefix}/${assetPath}`) };
 }
@@ -612,6 +612,12 @@ function assetsForMarkdown(markdown) {
       match = pattern.exec(markdown);
     }
   });
+  const publicAssetPattern = new RegExp(`https://${BROWSER_OSS_CONFIG.bucket}\\.${BROWSER_OSS_CONFIG.endpoint.replaceAll(".", "\\.")}/mininote/[^/]+/(assets/[^)\\s]+)`, "g");
+  let publicMatch = publicAssetPattern.exec(markdown);
+  while (publicMatch) {
+    assets.add(decodeURIComponent(publicMatch[1]));
+    publicMatch = publicAssetPattern.exec(markdown);
+  }
   return [...assets];
 }
 
@@ -738,12 +744,22 @@ function closeExportDialog() {
   exportDialog.classList.add("hidden");
 }
 
+function savedCloudSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("mininote.cloud.v1"));
+    return saved && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
 function cloudSettings() {
+  const saved = savedCloudSettings();
   return {
-    account: cloudAccount.value.trim(),
-    pin: cloudPin.value.trim(),
-    ossAccessKeyId: cloudAccessKeyId.value.trim(),
-    ossSecret: cloudAccessKeySecret.value.trim()
+    account: cloudAccount.value.trim() || saved.account || "",
+    pin: cloudPin.value.trim() || saved.pin || "",
+    ossAccessKeyId: cloudAccessKeyId.value.trim() || saved.ossAccessKeyId || "",
+    ossSecret: cloudAccessKeySecret.value.trim() || saved.ossSecret || ""
   };
 }
 
@@ -762,17 +778,11 @@ function validateCloudSettings() {
 }
 
 function loadCloudSettings() {
-  try {
-    const saved = JSON.parse(localStorage.getItem("mininote.cloud.v1"));
-    if (saved) {
-      cloudAccount.value = saved.account || "";
-      cloudPin.value = saved.pin || "";
-      cloudAccessKeyId.value = saved.ossAccessKeyId || "";
-      cloudAccessKeySecret.value = saved.ossSecret || "";
-    }
-  } catch {
-    // Ignore bad local settings.
-  }
+  const saved = savedCloudSettings();
+  cloudAccount.value = saved.account || "";
+  cloudPin.value = saved.pin || "";
+  cloudAccessKeyId.value = saved.ossAccessKeyId || "";
+  cloudAccessKeySecret.value = saved.ossSecret || "";
 }
 
 async function cloudRequest(path, payload) {
@@ -833,13 +843,13 @@ async function hmacSha1Base64(secret, value) {
   return bytesToBase64(new Uint8Array(signature));
 }
 
-async function signedOssUrl(method, key, contentType, secret) {
+async function signedOssUrl(method, key, contentType, settings) {
   const expires = Math.floor(Date.now() / 1000) + 600;
   const resource = `/${BROWSER_OSS_CONFIG.bucket}/${key}`;
   const stringToSign = `${method}\n\n${contentType || ""}\n${expires}\n${resource}`;
-  const signature = await hmacSha1Base64(secret, stringToSign);
+  const signature = await hmacSha1Base64(settings.ossSecret, stringToSign);
   const url = new URL(`https://${BROWSER_OSS_CONFIG.bucket}.${BROWSER_OSS_CONFIG.endpoint}/${encodeOssKey(key)}`);
-  url.searchParams.set("OSSAccessKeyId", cloudAccessKeyId.value.trim());
+  url.searchParams.set("OSSAccessKeyId", settings.ossAccessKeyId);
   url.searchParams.set("Expires", String(expires));
   url.searchParams.set("Signature", signature);
   return url.toString();
@@ -853,8 +863,8 @@ function publicOssUrl(key) {
   return `https://${BROWSER_OSS_CONFIG.bucket}.${BROWSER_OSS_CONFIG.endpoint}/${encodeOssKey(key)}`;
 }
 
-async function browserOssRequest(method, key, body, contentType, secret) {
-  const url = await signedOssUrl(method, key, contentType, secret);
+async function browserOssRequest(method, key, body, contentType, settings) {
+  const url = await signedOssUrl(method, key, contentType, settings);
   const headers = {};
   if (contentType) headers["Content-Type"] = contentType;
   const response = await fetch(url, {
@@ -879,9 +889,9 @@ function replaceLocalAssetsWithPublicUrls(markdown, prefix, assetNames) {
   });
 }
 
-async function browserReadManifest(prefix, secret) {
+async function browserReadManifest(prefix, settings) {
   try {
-    const response = await browserOssRequest("GET", `${prefix}/manifest.json`, null, "", secret);
+    const response = await browserOssRequest("GET", `${prefix}/manifest.json`, null, "", settings);
     return response.json();
   } catch (error) {
     if (error.statusCode === 404) return null;
@@ -916,12 +926,12 @@ function clearSyncedAssetUrls() {
   syncedAssetUrls.clear();
 }
 
-async function browserLoadCloudAssets(prefix, assetNames, secret) {
+async function browserLoadCloudAssets(prefix, assetNames, settings) {
   clearSyncedAssetUrls();
   for (const assetName of assetNames) {
     if (!assetName.startsWith("assets/")) continue;
     try {
-      const response = await browserOssRequest("GET", `${prefix}/${assetName}`, null, "", secret);
+      const response = await browserOssRequest("GET", `${prefix}/${assetName}`, null, "", settings);
       const blob = await response.blob();
       syncedAssetUrls.set(assetName, URL.createObjectURL(blob));
     } catch {
@@ -930,14 +940,14 @@ async function browserLoadCloudAssets(prefix, assetNames, secret) {
   }
 }
 
-async function browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, secret) {
+async function browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, settings) {
   if (!oldManifest || !Array.isArray(oldManifest.assets)) return 0;
   const nextAssets = new Set(nextAssetNames);
   let deleted = 0;
   for (const assetName of oldManifest.assets) {
     if (nextAssets.has(assetName) || !assetName.startsWith("assets/")) continue;
     try {
-      await browserOssRequest("DELETE", `${prefix}/${assetName}`, null, "", secret);
+      await browserOssRequest("DELETE", `${prefix}/${assetName}`, null, "", settings);
       deleted += 1;
     } catch (error) {
       if (error.statusCode !== 404) throw error;
@@ -949,15 +959,16 @@ async function browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, se
 async function browserCloudUpload(payload) {
   const account = safeCloudAccount(payload.account);
   const prefix = cloudPrefix(account);
-  const oldManifest = await browserReadManifest(prefix, payload.ossSecret);
+  const oldManifest = await browserReadManifest(prefix, payload);
   const keyHash = await sha256Hex(`${account}:${payload.pin}`);
   if (oldManifest && oldManifest.keyHash !== keyHash) {
     throw new Error("账户名或传输密钥不匹配");
   }
 
-  const assetFiles = await browserAssetFiles(Array.isArray(payload.assets) ? payload.assets : []);
-  const nextAssetNames = assetFiles.map((asset) => asset.name);
-  const deletedAssets = await browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, payload.ossSecret);
+  const requestedAssets = Array.isArray(payload.assets) ? payload.assets.filter((asset) => asset.startsWith("assets/")) : [];
+  const assetFiles = await browserAssetFiles(requestedAssets);
+  const nextAssetNames = [...new Set([...requestedAssets, ...assetFiles.map((asset) => asset.name)])];
+  const deletedAssets = await browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, payload);
   const notes = Array.isArray(payload.notes)
     ? payload.notes.map((note) => ({
       ...note,
@@ -979,24 +990,25 @@ async function browserCloudUpload(payload) {
     `${prefix}/manifest.json`,
     JSON.stringify(manifest, null, 2),
     "application/json; charset=utf-8",
-    payload.ossSecret
+    payload
   );
   for (const asset of assetFiles) {
-    await browserOssRequest("PUT", `${prefix}/${asset.name}`, asset.data, asset.type, payload.ossSecret);
+    await browserOssRequest("PUT", `${prefix}/${asset.name}`, asset.data, asset.type, payload);
   }
 
   return {
     ok: true,
     uploadedNotes: manifest.notes.length,
     uploadedAssets: assetFiles.length,
-    deletedAssets
+    deletedAssets,
+    updatedNotes: manifest.notes
   };
 }
 
 async function browserCloudSync(payload) {
   const account = safeCloudAccount(payload.account);
   const prefix = cloudPrefix(account);
-  const manifest = await browserReadManifest(prefix, payload.ossSecret);
+  const manifest = await browserReadManifest(prefix, payload);
   if (!manifest) {
     throw new Error("云端还没有可同步的数据，请先上传。");
   }
@@ -1004,7 +1016,7 @@ async function browserCloudSync(payload) {
     throw new Error("账户名或传输密钥不匹配");
   }
   const assets = Array.isArray(manifest.assets) ? manifest.assets : [];
-  await browserLoadCloudAssets(prefix, assets, payload.ossSecret);
+  await browserLoadCloudAssets(prefix, assets, payload);
   return {
     ok: true,
     activeId: manifest.activeId || "",
@@ -1025,6 +1037,9 @@ async function uploadCloud() {
       notes: notesState.notes,
       assets: assetsForNotes(notesState.notes)
     });
+    if (Array.isArray(result.updatedNotes)) {
+      applyUploadedNotes(result.updatedNotes);
+    }
     closeCloudDialog();
     saveState.textContent = `已上传 ${result.uploadedNotes} 篇笔记`;
     alert(`已上传到云端：${result.uploadedNotes} 篇笔记，${result.uploadedAssets} 个附件。已清理 ${result.deletedAssets || 0} 个云端旧附件。`);
@@ -1033,6 +1048,16 @@ async function uploadCloud() {
     saveState.textContent = "云端上传失败";
     alert(error.message);
   }
+}
+
+function applyUploadedNotes(updatedNotes) {
+  const updatedById = new Map(updatedNotes.map((note) => [note.id, note]));
+  notesState.notes = notesState.notes.map((note) => {
+    const updated = updatedById.get(note.id);
+    return updated ? { ...note, body: updated.body || "" } : note;
+  });
+  persistNotes();
+  loadActiveNote();
 }
 
 function mergeCloudNotes(cloudNotes) {

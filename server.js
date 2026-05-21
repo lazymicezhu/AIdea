@@ -32,7 +32,10 @@ function loadEnvFile() {
 loadEnvFile();
 
 const PORT = Number(process.env.PORT || 4173);
-const ASSET_DIR = path.join(ROOT, "assets");
+const BUNDLED_ASSET_DIR = path.join(ROOT, "assets");
+const ASSET_DIR = process.env.AIDEA_DATA_DIR
+  ? path.join(process.env.AIDEA_DATA_DIR, "assets")
+  : BUNDLED_ASSET_DIR;
 const PDF_EXPORTER = path.join(ROOT, "pdf-export.swift");
 const DEFAULT_OSS_BUCKET = process.env.ALI_OSS_BUCKET || "";
 const DEFAULT_OSS_REGION = process.env.ALI_OSS_REGION || "";
@@ -160,6 +163,19 @@ function ossConfigured(config) {
 
 function encodeOssKey(key) {
   return key.split("/").map(encodeURIComponent).join("/");
+}
+
+function publicOssUrl(config, key) {
+  return `https://${config.bucket}.${config.endpoint}/${encodeOssKey(key)}`;
+}
+
+function replaceLocalAssetsWithPublicUrls(markdown, config, prefix, assetNames) {
+  const assetSet = new Set(assetNames);
+  return String(markdown || "").replace(/(!?\[[^\]]*\]\()([^)]+)(\))/g, (match, opener, src, closer) => {
+    const cleanSrc = decodeURIComponent(src.trim());
+    if (!cleanSrc.startsWith("assets/") || !assetSet.has(cleanSrc)) return match;
+    return `${opener}${publicOssUrl(config, `${prefix}/${cleanSrc}`)}${closer}`;
+  });
 }
 
 function ossRequest(config, method, key, body = Buffer.alloc(0), contentType = "") {
@@ -432,15 +448,23 @@ async function handleCloudUpload(req, res) {
     sendJson(res, 403, { error: "账户名或传输密钥不匹配" });
     return;
   }
-  const nextAssetNames = assetFiles.map((asset) => asset.name);
+  const requestedAssets = assets
+    .map((assetName) => safeAssetPath(String(assetName || "")))
+    .filter(Boolean)
+    .map((assetName) => assetName.replaceAll(path.sep, "/"));
+  const nextAssetNames = [...new Set([...requestedAssets, ...assetFiles.map((asset) => asset.name)])];
   const deletedAssets = await deleteUnusedCloudAssets(ossConfig, prefix, oldManifest, nextAssetNames);
+  const publicNotes = notes.map((note) => ({
+    ...note,
+    body: replaceLocalAssetsWithPublicUrls(note.body, ossConfig, prefix, nextAssetNames)
+  }));
   const manifest = {
     version: 1,
     account,
     keyHash: pinHash(account, pin),
     uploadedAt: Date.now(),
     activeId,
-    notes,
+    notes: publicNotes,
     assets: nextAssetNames
   };
 
@@ -449,7 +473,7 @@ async function handleCloudUpload(req, res) {
     await ossRequest(ossConfig, "PUT", `${prefix}/${asset.name}`, asset.data, MIME_TYPES[path.extname(asset.name).toLowerCase()] || "application/octet-stream");
   }
 
-  sendJson(res, 200, { ok: true, uploadedNotes: notes.length, uploadedAssets: assetFiles.length, deletedAssets });
+  sendJson(res, 200, { ok: true, uploadedNotes: notes.length, uploadedAssets: assetFiles.length, deletedAssets, updatedNotes: publicNotes });
 }
 
 async function handleCloudSync(req, res) {
@@ -520,6 +544,27 @@ async function handleUpload(req, res) {
 async function handleStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
+  if (pathname === "/assets" || pathname.startsWith("/assets/")) {
+    const assetPath = path.normalize(path.join(ASSET_DIR, pathname.replace(/^\/assets\/?/, "")));
+    const bundledAssetPath = path.normalize(path.join(BUNDLED_ASSET_DIR, pathname.replace(/^\/assets\/?/, "")));
+    const candidates = [assetPath, bundledAssetPath];
+
+    for (const candidate of candidates) {
+      const base = candidate.startsWith(ASSET_DIR) ? ASSET_DIR : BUNDLED_ASSET_DIR;
+      if (!candidate.startsWith(base)) continue;
+      try {
+        const data = await fs.readFile(candidate);
+        const type = MIME_TYPES[path.extname(candidate).toLowerCase()] || "application/octet-stream";
+        send(res, 200, data, { "Content-Type": type });
+        return;
+      } catch {
+        // Try the next asset location.
+      }
+    }
+
+    send(res, 404, "Not found");
+    return;
+  }
   const filePath = path.normalize(path.join(ROOT, pathname));
 
   if (!filePath.startsWith(ROOT)) {

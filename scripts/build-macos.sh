@@ -143,7 +143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
 
         let logDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/AIdea", isDirectory: true)
+        let dataDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/AIdea", isDirectory: true)
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         let logURL = logDir.appendingPathComponent("server.log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
 
@@ -151,7 +154,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
         process.executableURL = URL(fileURLWithPath: nodePath)
         process.arguments = ["server.js"]
         process.currentDirectoryURL = appDir
-        process.environment = ProcessInfo.processInfo.environment.merging(["PORT": port]) { _, new in new }
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "PORT": port,
+            "AIDEA_DATA_DIR": dataDir.path
+        ]) { _, new in new }
 
         if let logHandle = try? FileHandle(forWritingTo: logURL) {
             logHandle.seekToEndOfFile()

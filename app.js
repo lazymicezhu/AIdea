@@ -511,7 +511,46 @@ function updateMediaMarkdownSize(targetIndex, nextSize) {
   renderPreview();
 }
 
+function localServiceAvailable() {
+  return ["localhost", "127.0.0.1", ""].includes(window.location.hostname);
+}
+
+function browserOssReady(settings) {
+  return Boolean(settings.account && settings.ossAccessKeyId && settings.ossSecret);
+}
+
+function cleanAssetFilename(name) {
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";
+  const base = (ext ? name.slice(0, -ext.length) : name)
+    .trim()
+    .replace(/[\\/:*?"<>|#%{}]+/g, "-")
+    .replace(/\s+/g, "-") || "asset";
+  return `${Date.now()}-${base}${ext}`;
+}
+
+async function browserUploadAsset(file, settings) {
+  const prefix = cloudPrefix(settings.account);
+  const assetPath = `assets/${cleanAssetFilename(file.name)}`;
+  await browserOssRequest(
+    "PUT",
+    `${prefix}/${assetPath}`,
+    await file.arrayBuffer(),
+    file.type || "application/octet-stream",
+    settings.ossSecret
+  );
+  return { path: publicOssUrl(`${prefix}/${assetPath}`) };
+}
+
 async function uploadAsset(file) {
+  const settings = cloudSettings();
+  if (browserOssReady(settings)) {
+    return browserUploadAsset(file, settings);
+  }
+
+  if (!localServiceAvailable()) {
+    throw new Error("手机浏览器插入图片需要先在云端同步的高级设置里填写账户名、AccessKey ID 和 OSS Secret。");
+  }
+
   const formData = new FormData();
   formData.append("asset", file, file.name);
   const response = await fetch("/upload", {
@@ -535,7 +574,7 @@ async function insertAsset(file) {
     setTimeout(saveNote, 240);
   } catch (error) {
     console.error(error);
-    alert("附件保存失败。请确认 AIdea 本地服务正在运行，并重新打开应用后再试。");
+    alert(error.message || "附件保存失败。请确认 AIdea 本地服务正在运行，并重新打开应用后再试。");
     saveNote();
   }
 }

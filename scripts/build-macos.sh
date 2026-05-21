@@ -9,6 +9,7 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 BUNDLED_APP_DIR="$RESOURCES_DIR/app"
+ICON_FILE="$ROOT_DIR/branding/AIdea.icns"
 BUILD_DIR="$DIST_DIR/build"
 SWIFT_SOURCE="$BUILD_DIR/AIdeaApp.swift"
 
@@ -21,6 +22,16 @@ cp "$ROOT_DIR/app.js" "$BUNDLED_APP_DIR/"
 cp "$ROOT_DIR/server.js" "$BUNDLED_APP_DIR/"
 cp "$ROOT_DIR/pdf-export.swift" "$BUNDLED_APP_DIR/"
 cp "$ROOT_DIR/README.md" "$BUNDLED_APP_DIR/"
+
+if [ -f "$ICON_FILE" ]; then
+  cp "$ICON_FILE" "$RESOURCES_DIR/AIdea.icns"
+fi
+
+if [ -d "$ROOT_DIR/branding" ]; then
+  mkdir -p "$BUNDLED_APP_DIR/branding"
+  cp "$ROOT_DIR/branding/favicon.png" "$BUNDLED_APP_DIR/branding/"
+  cp "$ROOT_DIR/branding/apple-touch-icon.png" "$BUNDLED_APP_DIR/branding/"
+fi
 
 if [ -f "$ROOT_DIR/.env" ]; then
   cp "$ROOT_DIR/.env" "$BUNDLED_APP_DIR/.env"
@@ -47,6 +58,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key>
   <string>1.0.0</string>
   <key>CFBundleExecutable</key>
+  <string>AIdea</string>
+  <key>CFBundleIconFile</key>
   <string>AIdea</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>

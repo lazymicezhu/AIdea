@@ -262,6 +262,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
             completionHandler(response == .alertFirstButtonReturn)
         }
     }
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.beginSheetModal(for: window!) { response in
+            completionHandler(response == .OK ? panel.urls : nil)
+        }
+    }
 }
 
 let app = NSApplication.shared

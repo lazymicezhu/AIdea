@@ -268,13 +268,22 @@ async function readAssetFiles(assetPaths) {
   for (const assetPath of assetPaths) {
     const safePath = safeAssetPath(assetPath);
     if (!safePath) continue;
-    const source = path.join(ROOT, safePath);
-    if (!source.startsWith(ASSET_DIR)) continue;
-    try {
-      const data = await fs.readFile(source);
-      files.push({ name: safePath.replaceAll(path.sep, "/"), data });
-    } catch {
-      // Missing assets are skipped so one broken reference does not block export.
+    const normalizedName = safePath.replaceAll(path.sep, "/");
+    const candidates = [
+      path.join(ASSET_DIR, safePath.replace(/^assets[/\\]?/, "")),
+      path.join(BUNDLED_ASSET_DIR, safePath.replace(/^assets[/\\]?/, ""))
+    ];
+
+    for (const source of candidates) {
+      const allowed = source.startsWith(ASSET_DIR) || source.startsWith(BUNDLED_ASSET_DIR);
+      if (!allowed) continue;
+      try {
+        const data = await fs.readFile(source);
+        files.push({ name: normalizedName, data });
+        break;
+      } catch {
+        // Try the next asset location.
+      }
     }
   }
   return files;
@@ -452,11 +461,12 @@ async function handleCloudUpload(req, res) {
     .map((assetName) => safeAssetPath(String(assetName || "")))
     .filter(Boolean)
     .map((assetName) => assetName.replaceAll(path.sep, "/"));
-  const nextAssetNames = [...new Set([...requestedAssets, ...assetFiles.map((asset) => asset.name)])];
+  const uploadedAssetNames = assetFiles.map((asset) => asset.name);
+  const nextAssetNames = [...new Set([...requestedAssets.filter((assetName) => oldManifest?.assets?.includes(assetName)), ...uploadedAssetNames])];
   const deletedAssets = await deleteUnusedCloudAssets(ossConfig, prefix, oldManifest, nextAssetNames);
   const publicNotes = notes.map((note) => ({
     ...note,
-    body: replaceLocalAssetsWithPublicUrls(note.body, ossConfig, prefix, nextAssetNames)
+    body: replaceLocalAssetsWithPublicUrls(note.body, ossConfig, prefix, uploadedAssetNames)
   }));
   const manifest = {
     version: 1,

@@ -967,12 +967,13 @@ async function browserCloudUpload(payload) {
 
   const requestedAssets = Array.isArray(payload.assets) ? payload.assets.filter((asset) => asset.startsWith("assets/")) : [];
   const assetFiles = await browserAssetFiles(requestedAssets);
-  const nextAssetNames = [...new Set([...requestedAssets, ...assetFiles.map((asset) => asset.name)])];
+  const uploadedAssetNames = assetFiles.map((asset) => asset.name);
+  const nextAssetNames = [...new Set([...requestedAssets.filter((assetName) => syncedAssetUrls.has(assetName)), ...uploadedAssetNames])];
   const deletedAssets = await browserDeleteUnusedAssets(prefix, oldManifest, nextAssetNames, payload);
   const notes = Array.isArray(payload.notes)
     ? payload.notes.map((note) => ({
       ...note,
-      body: replaceLocalAssetsWithPublicUrls(String(note.body || ""), prefix, nextAssetNames)
+      body: replaceLocalAssetsWithPublicUrls(String(note.body || ""), prefix, uploadedAssetNames)
     }))
     : [];
   const manifest = {
